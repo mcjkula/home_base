@@ -10,7 +10,7 @@ import time
 
 class HomeBase(plugins.Plugin):
     __author__ = '@troystauffer'
-    __version__ = '1.0.1'
+    __version__ = '1.0.2'
     __license__ = 'GPL3'
     __description__ = 'Connects to home network for internet when available'
 
@@ -18,6 +18,7 @@ class HomeBase(plugins.Plugin):
         self.ready = 0
         self.status = ''
         self.network = ''
+        self.connected = False
 
     def on_loaded(self):
         for opt in ['ssid', 'password', 'minimum_signal_strength']:
@@ -30,46 +31,78 @@ class HomeBase(plugins.Plugin):
     def on_unfiltered_ap_list(self, agent, access_points):
         home_network = self.options['ssid']
         result = _run('iwconfig wlan0')
-        if self.ready == 1 and "Not-Associated" in result:
+        
+        if agent.mode == 'auto' and self.ready == 1 and "Not-Associated" in result:
             for network in access_points:
                 if network['hostname'] == home_network:
                     signal_strength = network['rssi']
                     channel = network['channel']
                     _log("FOUND home network nearby on channel %d (rssi: %d)" % (channel, signal_strength))
                     if signal_strength >= self.options['minimum_signal_strength']:
-                        _log("Starting association...")
-                        self.ready = 0
-                        _connect_to_target_network(self, agent, network['hostname'], channel)
+                        _log("Starting transition to MANUAL mode...")
+                        display = agent.view()
+                        display.set('status', f"Home network found! Switching to MANUAL...")
+                        display.set('face', '(◕‿‿◕)')
+                        display.update(force=True)
+                        time.sleep(1)
+                        pwnagotchi.reboot(mode="MANU")
+                        return
                     else:
                         _log("The signal strength is too low (%d) to connect." % (signal_strength))
                         self.status = 'rssi_low'
+                        self.network = home_network
+        
+        elif agent.mode == 'manual':
+            home_found = False
+            for network in access_points:
+                if network['hostname'] == home_network:
+                    home_found = True
+                    signal_strength = network['rssi']
+                    channel = network['channel']
+                    
+                    if signal_strength >= self.options['minimum_signal_strength'] and not self.connected:
+                        _log("Home network in range with good signal, connecting...")
+                        self.ready = 0
+                        _connect_to_target_network(self, agent, network['hostname'], channel)
+                    break
+            
+            if not home_found and "Not-Associated" in result:
+                _log("Home network no longer in range, switching back to AUTO mode")
+                display = agent.view()
+                display.set('status', "Going back to hunting mode...")
+                display.set('face', '(¬‿¬)')
+                display.update(force=True)
+                time.sleep(1)
+                pwnagotchi.reboot(mode="AUTO")
+
+    def on_manual_mode(self, agent):
+        _log("Device in MANUAL mode - will look for home network")
+        self.connected = False
 
     def on_ui_update(self, ui):
-        while self.status == 'rssi_low':
+        if self.status == 'rssi_low':
             ui.set('face', '(ﺏ__ﺏ)')
             ui.set('status', 'Signal strength of %s is currently too low to connect ...' % self.network)
-        while self.status == 'home_detected':
+        elif self.status == 'home_detected':
             ui.set('face', '(◕‿‿◕)')
-            ui.set('face', '(ᵔ◡◡ᵔ)')
             ui.set('status', 'Found home network at %s ...' % self.network)
-        while self.status == 'switching_mon_off':
+        elif self.status == 'switching_mon_off':
             ui.set('face', '(◕‿‿◕)')
-            ui.set('face', '(ᵔ◡◡ᵔ)')
             ui.set('status', 'We\'re home! Pausing monitor mode ...')
-        while self.status == 'scrambling_mac':
+        elif self.status == 'scrambling_mac':
             ui.set('face', '(⌐■_■)')
             ui.set('status', 'Scrambling MAC address before connecting to %s ...' % self.network)
-        while self.status == 'associating':
+        elif self.status == 'associating':
             ui.set('status', 'Greeting the AP and asking for an IP via DHCP ...')
             ui.set('face', '(◕‿◕ )')
-            ui.set('face', '( ◕‿◕)')
-        if self.status == 'associated':
+        elif self.status == 'associated':
             ui.set('face', '(ᵔ◡◡ᵔ)')
             ui.set('status', 'Home at last!')
 
     def on_epoch(self, agent, epoch, epoch_data):
-        if "Not-Associated" in _run('iwconfig wlan0') and "Monitor" not in _run('iwconfig wlan0mon'):
-            _restart_monitor_mode(self,agent)
+        if agent.mode == 'manual' and self.connected and "Not-Associated" in _run('iwconfig wlan0'):
+            _log("Lost connection to home network, will check if still in range next scan")
+            self.connected = False
 
 def _run(cmd):
     result = subprocess.run(cmd, shell=True, stdin=None, stderr=None, stdout=subprocess.PIPE, executable="/bin/bash")
@@ -89,7 +122,7 @@ def _connect_to_target_network(self, agent, network_name, channel):
     time.sleep(5)
     
     _log('removing monitor interface...')
-    subprocess.run('iw dev wlan0mon del', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
+    subprocess.run('iw dev wlan0mon del 2>/dev/null', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
     
     _log('disabling monitor mode...')
     subprocess.run('modprobe --remove brcmfmac; modprobe brcmfmac', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
@@ -113,7 +146,7 @@ def _connect_to_target_network(self, agent, network_name, channel):
     time.sleep(2)
     
     with open('/tmp/wpa_supplicant.conf', 'w') as wpa_supplicant_conf:
-        wpa_supplicant_conf.write("ctrl_interface=DIR=/var/run/wpa_supplicant\nupdate_config=1\ncountry=GB\n\nnetwork={\n\tssid=\"%s\"\n\tpsk=\"%s\"\n}\n" % (network_name, self.options['password']))
+        wpa_supplicant_conf.write("ctrl_interface=DIR=/var/run/wpa_supplicant\nupdate_config=1\ncountry=DE\n\nnetwork={\n\tssid=\"%s\"\n\tpsk=\"%s\"\n}\n" % (network_name, self.options['password']))
     
     _log('starting wpa_supplicant...')
     subprocess.run('wpa_supplicant -B -c /tmp/wpa_supplicant.conf -i wlan0', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
@@ -123,30 +156,15 @@ def _connect_to_target_network(self, agent, network_name, channel):
     subprocess.run('dhclient -v wlan0', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
     time.sleep(3)
     
+    if "inet" in _run('ifconfig wlan0'):
+        self.status = 'associated'
+        self.connected = True
+        _log('successfully connected to home wifi')
+    else:
+        _log('failed to get IP address')
+    
     self.status = 'associated'
     self.ready = 1
-    _log('finished connecting to home wifi')
-
-def _restart_monitor_mode(self,agent):
-    _log('resuming wifi recon...')
-    _log('stopping wpa_supplicant...')
-    subprocess.run('systemctl stop wpa_supplicant; killall wpa_supplicant', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    time.sleep(2)
-    
-    _log('creating wlan0mon interface...')
-    subprocess.run('iw phy "$(iw phy | head -1 | cut -d" " -f2)" interface add wlan0mon type monitor && ifconfig wlan0mon up', 
-                  shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    time.sleep(3)
-    
-    for attempt in range(3):
-        try:
-            agent.run('wifi.recon on')
-            break
-        except Exception as e:
-            _log(f"Recon enable failed (attempt {attempt+1}): {str(e)}")
-            time.sleep(5)
-    
-    agent.next_epoch(self)
 
 def _log(message):
     logging.info('[home_base] %s' % message)
