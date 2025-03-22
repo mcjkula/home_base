@@ -1,6 +1,6 @@
 # home-base watches for a pre-defined home network to be in range, then pauses pwning to
 # allow for internet connectivity tasks to be carried out. Once out of range, pwning is resumed
-# Inspiration and some methodologies taken from @nagy_craig's "Educational-purposes-only" plugin
+# Inspiration and some methodologies taken from @nagy_craig's "Educational-purposes-only" plugin (forked from @troystauffer)
 # Install dependencies: apt update; apt install nmap macchanger
 import pwnagotchi.plugins as plugins
 import pwnagotchi
@@ -9,8 +9,8 @@ import subprocess
 import time
 
 class HomeBase(plugins.Plugin):
-    __author__ = '@troystauffer'
-    __version__ = '1.0.0'
+    __author__ = '@mcjkula'
+    __version__ = '1.0.1'
     __license__ = 'GPL3'
     __description__ = 'Connects to home network for internet when available'
 
@@ -26,7 +26,7 @@ class HomeBase(plugins.Plugin):
                 return
         _log("plugin loaded")
         self.ready = 1
-    
+
     def on_unfiltered_ap_list(self, agent, access_points):
         home_network = self.options['ssid']
         result = _run('iwconfig wlan0')
@@ -66,9 +66,9 @@ class HomeBase(plugins.Plugin):
         if self.status == 'associated':
             ui.set('face', '(ᵔ◡◡ᵔ)')
             ui.set('status', 'Home at last!')
-        
+
     def on_epoch(self, agent, epoch, epoch_data):
-        if "Not-Associated" in _run('iwconfig wlan0') and "Monitor" not in _run('iwconfig mon0'):
+        if "Not-Associated" in _run('iwconfig wlan0') and "Monitor" not in _run('iwconfig wlan0mon'):
             _restart_monitor_mode(self,agent)
 
 def _run(cmd):
@@ -84,9 +84,10 @@ def _connect_to_target_network(self, agent, network_name, channel):
     subprocess.run('systemctl stop wpa_supplicant; killall wpa_supplicant', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
     time.sleep(5)
     _log('disabling monitor mode...')
-    subprocess.run('modprobe --remove brcmfmac; modprobe brcmfmac', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    time.sleep(5)
-    # Runs this driver reload command again because sometimes it gets stuck the first time:
+    subprocess.run('ip link set wlan0mon down', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
+    subprocess.run('iw dev wlan0mon del', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
+    time.sleep(2)
+    _log('reloading wireless driver...')
     subprocess.run('modprobe --remove brcmfmac; modprobe brcmfmac', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
     time.sleep(5)
     _log('randomizing wlan0 MAC address prior to connecting...')
@@ -96,7 +97,6 @@ def _connect_to_target_network(self, agent, network_name, channel):
     _log('starting up wlan0 again...')
     subprocess.run('ifconfig wlan0 up', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
     time.sleep(3)
-    # This command runs multiple times because it sometimes doesn't work the first time:
     subprocess.run('ifconfig wlan0 up', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
     time.sleep(5)
     _log('setting wlan0 channel to match the target...')
@@ -121,24 +121,35 @@ def _connect_to_target_network(self, agent, network_name, channel):
     self.status = 'associated'
     self.ready = 1
     _log('finished connecting to home wifi')
-    
-def _restart_monitor_mode(self,agent):
-    _log('resuming wifi recon and monitor mode...')
-    _log('stopping wpa_supplicant...')
-    subprocess.run('systemctl stop wpa_supplicant; killall wpa_supplicant', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    time.sleep(5)
-    _log('reloading brcmfmac driver...')
-    subprocess.run('modprobe --remove brcmfmac && modprobe brcmfmac', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    time.sleep(5)
-    _log('randomizing MAC address of wlan0...')
-    subprocess.run('macchanger -A wlan0', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    time.sleep(5)
-    subprocess.run('ifconfig wlan0 up', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    _log('starting monitor mode...')
-    subprocess.run('iw phy "$(iw phy | head -1 | cut -d" " -f2)" interface add mon0 type monitor && ifconfig mon0 up', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    _log('telling Bettercap to resume wifi recon...')
-    agent.run('wifi.recon on')
-    agent.next_epoch(self)
+
+def _restart_monitor_mode(self, agent):
+    try:
+        _log('resuming wifi recon and monitor mode...')
+        _log('stopping wpa_supplicant...')
+        subprocess.run('systemctl stop wpa_supplicant; killall wpa_supplicant', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
+        time.sleep(5)
+        _log('reloading brcmfmac driver...')
+        subprocess.run('modprobe --remove brcmfmac && modprobe brcmfmac', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
+        time.sleep(5)
+        _log('randomizing MAC address of wlan0...')
+        subprocess.run('macchanger -A wlan0', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
+        time.sleep(5)
+        subprocess.run('ifconfig wlan0 up', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
+        _log('starting monitor mode...')
+        subprocess.run('iw phy `iw phy | head -1 | cut -d" " -f2` interface add wlan0mon type monitor && ifconfig wlan0mon up', 
+                      shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
+        time.sleep(3)
+        if "wlan0mon" not in _run("iwconfig"):
+            _log('Monitor interface not created, trying alternative method')
+            subprocess.run('ip link set wlan0 down', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None)
+            subprocess.run('iw dev wlan0 set type monitor', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None)
+            subprocess.run('ip link set wlan0 up', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None)
+        _log('telling Bettercap to resume wifi recon...')
+        agent.run('wifi.recon on')
+        self.ready = 1
+    except Exception as e:
+        _log(f'Error in restart_monitor_mode: {str(e)}')
+        self.ready = 1
 
 def _log(message):
     logging.info('[home_base] %s' % message)
