@@ -1,6 +1,6 @@
 # home-base watches for a pre-defined home network to be in range, then pauses pwning to
 # allow for internet connectivity tasks to be carried out. Once out of range, pwning is resumed
-# Inspiration and some methodologies taken from @nagy_craig's "Educational-purposes-only" plugin (forked from @troystauffer)
+# Inspiration and some methodologies taken from @nagy_craig's "Educational-purposes-only" plugin
 # Install dependencies: apt update; apt install nmap macchanger
 import pwnagotchi.plugins as plugins
 import pwnagotchi
@@ -9,7 +9,7 @@ import subprocess
 import time
 
 class HomeBase(plugins.Plugin):
-    __author__ = '@mcjkula'
+    __author__ = '@troystauffer'
     __version__ = '1.0.1'
     __license__ = 'GPL3'
     __description__ = 'Connects to home network for internet when available'
@@ -77,79 +77,76 @@ def _run(cmd):
 
 def _connect_to_target_network(self, agent, network_name, channel):
     self.network = network_name
-    _log('sending command to Bettercap to stop using mon0...')
+    _log('sending command to Bettercap to stop using wlan0mon...')
     self.status = 'switching_mon_off'
-    agent.run('wifi.recon off')
+    try:
+        agent.run('wifi.recon off')
+    except Exception as e:
+        _log(f"Error stopping recon: {str(e)}")
+    
     _log('ensuring all wpa_supplicant processes are terminated...')
     subprocess.run('systemctl stop wpa_supplicant; killall wpa_supplicant', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
     time.sleep(5)
-    _log('disabling monitor mode...')
-    subprocess.run('ip link set wlan0mon down', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
+    
+    _log('removing monitor interface...')
     subprocess.run('iw dev wlan0mon del', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    time.sleep(2)
-    _log('reloading wireless driver...')
+    
+    _log('disabling monitor mode...')
     subprocess.run('modprobe --remove brcmfmac; modprobe brcmfmac', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    time.sleep(5)
-    _log('randomizing wlan0 MAC address prior to connecting...')
-    self.status = 'scrambling_mac'
-    subprocess.run('macchanger -A wlan0', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    time.sleep(5)
-    _log('starting up wlan0 again...')
-    subprocess.run('ifconfig wlan0 up', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
     time.sleep(3)
-    subprocess.run('ifconfig wlan0 up', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    time.sleep(5)
+    
+    if "wlan0" in _run('iwconfig'):
+        _log('randomizing wlan0 MAC address prior to connecting...')
+        self.status = 'scrambling_mac'
+        subprocess.run('macchanger -A wlan0', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
+        time.sleep(2)
+        
+        for _ in range(3):
+            if "wlan0" in _run('ifconfig -a'):
+                break
+            subprocess.run('ifconfig wlan0 up', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
+            time.sleep(2)
+    
     _log('setting wlan0 channel to match the target...')
     self.status = 'associating'
     subprocess.run('iwconfig wlan0 channel %d' % channel, shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    subprocess.run('ifconfig wlan0 up', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    time.sleep(5)
-    _log('writing to wpa_supplicant.conf file...')
+    time.sleep(2)
+    
     with open('/tmp/wpa_supplicant.conf', 'w') as wpa_supplicant_conf:
         wpa_supplicant_conf.write("ctrl_interface=DIR=/var/run/wpa_supplicant\nupdate_config=1\ncountry=GB\n\nnetwork={\n\tssid=\"%s\"\n\tpsk=\"%s\"\n}\n" % (network_name, self.options['password']))
-    _log('starting wpa_supplicant background process...')
-    subprocess.run('ifconfig wlan0 up', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    subprocess.run('wpa_supplicant -u -s -c /tmp/wpa_supplicant.conf -i wlan0 &', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
+    
+    _log('starting wpa_supplicant...')
+    subprocess.run('wpa_supplicant -B -c /tmp/wpa_supplicant.conf -i wlan0', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
     time.sleep(5)
-    _log('connecting to wifi...')
-    subprocess.run('ifconfig wlan0 up', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    subprocess.run('wpa_cli -i wlan0 reconfigure', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    time.sleep(5)
-    _log('trying to get an IP address on the network via DHCP...')
-    subprocess.run('dhclient wlan0', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-    time.sleep(5)
+    
+    _log('requesting IP address...')
+    subprocess.run('dhclient -v wlan0', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
+    time.sleep(3)
+    
     self.status = 'associated'
     self.ready = 1
     _log('finished connecting to home wifi')
 
-def _restart_monitor_mode(self, agent):
-    try:
-        _log('resuming wifi recon and monitor mode...')
-        _log('stopping wpa_supplicant...')
-        subprocess.run('systemctl stop wpa_supplicant; killall wpa_supplicant', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-        time.sleep(5)
-        _log('reloading brcmfmac driver...')
-        subprocess.run('modprobe --remove brcmfmac && modprobe brcmfmac', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-        time.sleep(5)
-        _log('randomizing MAC address of wlan0...')
-        subprocess.run('macchanger -A wlan0', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-        time.sleep(5)
-        subprocess.run('ifconfig wlan0 up', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-        _log('starting monitor mode...')
-        subprocess.run('iw phy `iw phy | head -1 | cut -d" " -f2` interface add wlan0mon type monitor && ifconfig wlan0mon up', 
-                      shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
-        time.sleep(3)
-        if "wlan0mon" not in _run("iwconfig"):
-            _log('Monitor interface not created, trying alternative method')
-            subprocess.run('ip link set wlan0 down', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None)
-            subprocess.run('iw dev wlan0 set type monitor', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None)
-            subprocess.run('ip link set wlan0 up', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None)
-        _log('telling Bettercap to resume wifi recon...')
-        agent.run('wifi.recon on')
-        self.ready = 1
-    except Exception as e:
-        _log(f'Error in restart_monitor_mode: {str(e)}')
-        self.ready = 1
+def _restart_monitor_mode(self,agent):
+    _log('resuming wifi recon...')
+    _log('stopping wpa_supplicant...')
+    subprocess.run('systemctl stop wpa_supplicant; killall wpa_supplicant', shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
+    time.sleep(2)
+    
+    _log('creating wlan0mon interface...')
+    subprocess.run('iw phy "$(iw phy | head -1 | cut -d" " -f2)" interface add wlan0mon type monitor && ifconfig wlan0mon up', 
+                  shell=True, stdin=None, stdout=open("/dev/null", "w"), stderr=None, executable="/bin/bash")
+    time.sleep(3)
+    
+    for attempt in range(3):
+        try:
+            agent.run('wifi.recon on')
+            break
+        except Exception as e:
+            _log(f"Recon enable failed (attempt {attempt+1}): {str(e)}")
+            time.sleep(5)
+    
+    agent.next_epoch(self)
 
 def _log(message):
     logging.info('[home_base] %s' % message)
