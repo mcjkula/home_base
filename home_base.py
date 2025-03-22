@@ -11,7 +11,7 @@ import requests
 
 class HomeBase(plugins.Plugin):
     __author__ = '@troystauffer'
-    __version__ = '1.0.3'
+    __version__ = '1.0.4'
     __license__ = 'GPL3'
     __description__ = 'Connects to home network for internet when available'
 
@@ -19,7 +19,6 @@ class HomeBase(plugins.Plugin):
         self.ready = 0
         self.status = ''
         self.network = ''
-        self.original_interface = 'wlan0mon'
 
     def on_loaded(self):
         for opt in ['ssid', 'password', 'minimum_signal_strength']:
@@ -51,7 +50,27 @@ class HomeBase(plugins.Plugin):
                         self.status = 'rssi_low'
 
     def on_ui_update(self, ui):
-        pass
+        while self.status == 'rssi_low':
+            ui.set('face', '(ﺏ__ﺏ)')
+            ui.set('status', 'Signal strength of %s is currently too low to connect ...' % self.network)
+        while self.status == 'home_detected':
+            ui.set('face', '(◕‿‿◕)')
+            ui.set('face', '(ᵔ◡◡ᵔ)')
+            ui.set('status', 'Found home network at %s ...' % self.network)
+        while self.status == 'switching_mon_off':
+            ui.set('face', '(◕‿‿◕)')
+            ui.set('face', '(ᵔ◡◡ᵔ)')
+            ui.set('status', 'We\'re home! Pausing monitor mode ...')
+        while self.status == 'scrambling_mac':
+            ui.set('face', '(⌐■_■)')
+            ui.set('status', 'Scrambling MAC address before connecting to %s ...' % self.network)
+        while self.status == 'associating':
+            ui.set('status', 'Greeting the AP and asking for an IP via DHCP ...')
+            ui.set('face', '(◕‿◕ )')
+            ui.set('face', '( ◕‿◕)')
+        if self.status == 'associated':
+            ui.set('face', '(ᵔ◡◡ᵔ)')
+            ui.set('status', 'Home at last!')
 
     def on_epoch(self, agent, epoch, epoch_data):
         if "Not-Associated" in _run('iwconfig wlan0') and "Monitor" not in _run('iwconfig wlan0mon'):
@@ -83,63 +102,85 @@ def _connect_to_target_network(self, agent, network_name, channel):
     self.network = network_name
     self.status = 'switching_mon_off'
     
-    _notify_bettercap("wifi.recon off")
-    _notify_bettercap("set wifi.interface null")
-    _notify_bettercap("module off wifi")
-    time.sleep(5)
+    # Disable WiFi recon but keep bettercap running
+    _log("Disabling WiFi monitoring")
+    agent.run('wifi.recon off')
+    time.sleep(2)
     
-    subprocess.run('systemctl stop bettercap', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Use empty string instead of null/none
+    agent.run('set wifi.interface ""')
+    time.sleep(2)
+    
+    # Kill wpa_supplicant and dhclient but leave bettercap running
+    _log('Stopping network services...')
     subprocess.run('killall wpa_supplicant dhclient', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run('iw dev wlan0mon del', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run('modprobe -r brcmfmac', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(3)
-    subprocess.run('modprobe brcmfmac', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(5)
+    time.sleep(2)
     
-    for _ in range(3):
-        subprocess.run('macchanger -A wlan0', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(2)
-        if "00:00:00" not in _run('ifconfig wlan0 | grep HWaddr'):
-            break
-            
+    # Manually remove monitor interface
+    _log('Removing monitor interface...')
+    subprocess.run('iw dev wlan0mon del 2>/dev/null', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
+    
+    # Bring up wlan0 in managed mode
+    _log('Setting up managed interface...')
+    self.status = 'scrambling_mac'
+    
+    # Make sure wlan0 is up
+    subprocess.run('ifconfig wlan0 up', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
+    
+    # MAC randomization
+    subprocess.run('macchanger -A wlan0', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
+    
+    # Connection setup
+    self.status = 'associating'
+    _log(f'Connecting to {network_name} on channel {channel}...')
+    
     with open('/tmp/wpa_supplicant.conf', 'w') as f:
-        f.write(f'ctrl_interface=DIR=/var/run/wpa_supplicant\nupdate_config=1\ncountry=DE\n\nnetwork={{\n\tssid="{network_name}"\n\tpsk="{self.options["password"]}"\n}}\n')
+        f.write(f'ctrl_interface=DIR=/var/run/wpa_supplicant\nupdate_config=1\ncountry=GB\n\nnetwork={{\n\tssid="{network_name}"\n\tpsk="{self.options["password"]}"\n}}\n')
     
     subprocess.run('wpa_supplicant -B -c /tmp/wpa_supplicant.conf -i wlan0', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(5)
-    subprocess.run('dhclient -v wlan0', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(3)
     
-    self.status = 'associated'
-    self.ready = 1
-    _log("Successfully connected to home network")
+    # Get IP address
+    subprocess.run('dhclient wlan0', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(3)
+    
+    # Verify connection
+    if "Not-Associated" not in _run('iwconfig wlan0'):
+        _log("Successfully connected to home network")
+        self.status = 'associated'
+        self.ready = 1
+    else:
+        _log("Failed to connect - will retry later")
+        self.ready = 1
 
 def _restart_monitor_mode(self, agent):
     _log("Restoring monitoring capabilities")
     
-    subprocess.run('systemctl stop bettercap', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Release network connection
     subprocess.run('killall wpa_supplicant dhclient', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run('iw dev wlan0mon del', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run('modprobe -r brcmfmac', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(3)
-    subprocess.run('modprobe brcmfmac', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(5)
+    subprocess.run('dhclient -r wlan0', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
     
+    # Create monitor interface
+    _log('Creating monitor interface...')
+    subprocess.run('iw dev wlan0mon del 2>/dev/null', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(1)
     subprocess.run('iw phy $(iw phy | head -1 | cut -d" " -f2) interface add wlan0mon type monitor', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run('ifconfig wlan0mon up', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(3)
     
-    subprocess.run('systemctl start bettercap', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(10)
-    
-    for _ in range(3):
-        if _notify_bettercap("set wifi.interface wlan0mon") and \
-           _notify_bettercap("wifi.recon on") and \
-           _notify_bettercap("module restart wifi"):
-            break
-        time.sleep(5)
+    # Tell bettercap to use wlan0mon without restarting service
+    _log('Reconfiguring bettercap...')
+    agent.run('set wifi.interface wlan0mon')
+    time.sleep(2)
+    agent.run('wifi.recon on')
+    time.sleep(1)
     
     agent.next_epoch(self)
-    _log("Monitoring mode fully restored")
+    _log("Monitoring mode restored")
 
 def _log(message):
     logging.info(f'[home_base] {message}')
